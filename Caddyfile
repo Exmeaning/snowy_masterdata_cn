@@ -1,0 +1,37 @@
+{
+    auto_https off
+    admin off
+}
+
+:80 {
+    root * /data/serve
+
+    file_server {
+        precompressed br gzip
+    }
+
+    header {
+        Access-Control-Allow-Origin *
+        Access-Control-Allow-Methods "GET, HEAD, OPTIONS"
+        Access-Control-Allow-Headers "Content-Type, Accept-Encoding"
+        Cache-Control "public, max-age=300, must-revalidate"
+        X-Content-Type-Options nosniff
+        -Server
+    }
+
+    @options {
+        method OPTIONS
+    }
+    respond @options 204
+
+    @json path *.json
+    header @json Cache-Control "public, max-age=60, must-revalidate"
+
+    respond /health 200
+
+    log {
+        output stdout
+        format console
+        level INFO
+    }
+}

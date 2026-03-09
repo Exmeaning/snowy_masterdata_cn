@@ -91,8 +91,7 @@ func (w *Watcher) check(ctx context.Context) {
 		}
 	}
 
-	// 复制变更文件
-	var toCompress []string
+	// 复制变更文件 + 清理旧压缩（下次 CDN 请求时按需重新压缩）
 	for _, f := range changed {
 		if isGitPath(f) {
 			continue
@@ -103,7 +102,7 @@ func (w *Watcher) check(ctx context.Context) {
 			log.Printf("WARNING: copy %s: %v", f, err)
 			continue
 		}
-		toCompress = append(toCompress, dst)
+		w.compressor.InvalidateCompressed(dst)
 	}
 
 	// 预处理
@@ -118,16 +117,20 @@ func (w *Watcher) check(ctx context.Context) {
 			if err := copyFile(src, dst); err != nil {
 				log.Printf("WARNING: copy generated: %v", err)
 			} else {
-				toCompress = append(toCompress, dst)
+				w.compressor.InvalidateCompressed(dst)
 			}
 		}
-	}
-
-	// 增量压缩
-	if len(toCompress) > 0 {
-		log.Printf("Compressing %d files...", len(toCompress))
-		if err := w.compressor.CompressFiles(ctx, toCompress); err != nil {
-			log.Printf("WARNING: incremental compress: %v", err)
+		if err := RunMoePreprocessor(w.repoDir); err != nil {
+			log.Printf("WARNING: moe preprocessor: %v", err)
+		} else {
+			gen := "master/moe_costume.json"
+			src := filepath.Join(w.repoDir, gen)
+			dst := filepath.Join(w.serveDir, gen)
+			if err := copyFile(src, dst); err != nil {
+				log.Printf("WARNING: copy moe generated: %v", err)
+			} else {
+				w.compressor.InvalidateCompressed(dst)
+			}
 		}
 	}
 

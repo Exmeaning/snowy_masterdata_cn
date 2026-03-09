@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -30,14 +31,62 @@ var compressibleExtensions = map[string]bool{
 const minCompressSize = 256
 
 type Compressor struct {
-	workers int
+	workers    int
+	pending    sync.Map // 按需压缩去重：path → struct{}
+	asyncPool  *WorkerPool
+	asyncReady chan struct{} // 延迟初始化信号
 }
 
 func NewCompressor(workers int) *Compressor {
 	if workers <= 0 {
 		workers = runtime.NumCPU()
 	}
-	return &Compressor{workers: workers}
+	return &Compressor{
+		workers:    workers,
+		asyncReady: make(chan struct{}),
+	}
+}
+
+// InitAsyncPool 初始化按需压缩的后台工作池（serve 模式调用）
+func (c *Compressor) InitAsyncPool() {
+	poolSize := c.workers / 2
+	if poolSize < 1 {
+		poolSize = 1
+	}
+	c.asyncPool = NewWorkerPool(poolSize)
+	close(c.asyncReady)
+	log.Printf("Async compression pool ready (workers=%d)", poolSize)
+}
+
+// CompressFileAsync 按需异步压缩单个文件（去重，不阻塞调用方）
+func (c *Compressor) CompressFileAsync(path string) {
+	// 去重：同一文件只触发一次
+	if _, loaded := c.pending.LoadOrStore(path, struct{}{}); loaded {
+		return
+	}
+
+	// 等待 pool 就绪（正常流程下 InitAsyncPool 已调用，不会阻塞）
+	<-c.asyncReady
+
+	c.asyncPool.Submit(func() {
+		defer c.pending.Delete(path)
+
+		info, err := os.Stat(path)
+		if err != nil || !isCompressible(path) || info.Size() < minCompressSize {
+			return
+		}
+		if err := compressFile(path); err != nil {
+			log.Printf("WARNING: async compress %s: %v", path, err)
+			return
+		}
+		log.Printf("Lazy compressed: %s", path)
+	})
+}
+
+// InvalidateCompressed 清理文件的预压缩版本（文件变更时调用，让下次请求重新触发按需压缩）
+func (c *Compressor) InvalidateCompressed(servePath string) {
+	os.Remove(servePath + ".gz")
+	os.Remove(servePath + ".br")
 }
 
 func isCompressible(path string) bool {
@@ -95,41 +144,6 @@ func (c *Compressor) CompressAll(ctx context.Context, dir string) error {
 
 	log.Printf("Compression done: %d/%d files, %.1f MB original, %v elapsed",
 		compressedFiles, totalFiles, float64(totalOrigSize)/1024/1024, time.Since(start))
-	return nil
-}
-
-// CompressFiles 增量压缩（生产阶段调用）
-func (c *Compressor) CompressFiles(ctx context.Context, files []string) error {
-	pool := NewWorkerPool(c.workers)
-
-	for _, f := range files {
-		file := f
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		pool.Submit(func() {
-			info, err := os.Stat(file)
-			if err != nil {
-				// 文件被删除，清理压缩文件
-				os.Remove(file + ".gz")
-				os.Remove(file + ".br")
-				return
-			}
-			if !isCompressible(file) || info.Size() < minCompressSize {
-				os.Remove(file + ".gz")
-				os.Remove(file + ".br")
-				return
-			}
-			if err := compressFile(file); err != nil {
-				log.Printf("WARNING: compress %s: %v", file, err)
-			}
-		})
-	}
-
-	pool.Wait()
 	return nil
 }
 

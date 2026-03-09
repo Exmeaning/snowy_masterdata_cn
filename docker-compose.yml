@@ -9,13 +9,11 @@ services:
     ports:
       - "8080:80"
     volumes:
-      # 持久化数据，避免容器重启重新 clone（可选）
       - haruki-repo:/data/repo
       - haruki-serve:/data/serve
     deploy:
       resources:
         limits:
-          # 生产阶段 CPU 限制很低（全量压缩已在 build 完成）
           cpus: "2"
           memory: 512M
         reservations:

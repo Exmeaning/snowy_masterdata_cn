@@ -24,6 +24,7 @@ var (
 	flagRepoDir  string
 	flagServeDir string
 	flagWorkers  int
+	flagPort     string
 )
 
 func init() {
@@ -31,6 +32,7 @@ func init() {
 	flag.StringVar(&flagRepoDir, "repo", "/data/repo", "Git 仓库目录")
 	flag.StringVar(&flagServeDir, "serve-dir", "/data/serve", "静态文件服务目录")
 	flag.IntVar(&flagWorkers, "workers", 0, "并行压缩线程数 (0=CPU核心数)")
+	flag.StringVar(&flagPort, "port", "", "HTTP 监听端口 (默认读取 PORT 环境变量，兜底 80)")
 }
 
 func main() {
@@ -69,6 +71,9 @@ func runBuild() {
 	if err := RunPreprocessor(flagRepoDir); err != nil {
 		log.Printf("WARNING: Preprocessor failed: %v", err)
 	}
+	if err := RunMoePreprocessor(flagRepoDir); err != nil {
+		log.Printf("WARNING: MoePreprocessor failed: %v", err)
+	}
 
 	// 3. 同步到 serve 目录（排除 .git）
 	if err := syncToServeDir(flagRepoDir, flagServeDir); err != nil {
@@ -98,7 +103,7 @@ func runBuild() {
 }
 
 // ══════════════════════════════════════════════════════════════
-// serve 模式：生产阶段，只做增量监测 + 增量压缩
+// serve 模式：HTTP 文件服务 + 增量监测 + 按需压缩
 // ══════════════════════════════════════════════════════════════
 func runServe() {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -132,8 +137,28 @@ func runServe() {
 	}
 
 	compressor := NewCompressor(flagWorkers)
-	watcher := NewWatcher(repoURL, flagRepoDir, flagServeDir, compressor, pollInterval, lastCommit)
+	compressor.InitAsyncPool()
 
+	// 解析端口
+	port := flagPort
+	if port == "" {
+		port = os.Getenv("PORT")
+	}
+	if port == "" {
+		port = "80"
+	}
+
+	// 启动 HTTP 文件服务器
+	server := NewServer(flagServeDir, compressor, port)
+	go func() {
+		if err := server.Run(ctx); err != nil {
+			log.Printf("ERROR: HTTP server: %v", err)
+			cancel()
+		}
+	}()
+
+	// 启动 watcher
+	watcher := NewWatcher(repoURL, flagRepoDir, flagServeDir, compressor, pollInterval, lastCommit)
 	log.Println("Entering watch loop (interval: 1 min)...")
 	watcher.Run(ctx)
 

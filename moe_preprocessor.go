@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // ── 输出数据结构 ─────────────────────────────────────────────
@@ -82,14 +83,6 @@ type Costume3DColor struct {
 	Name string `json:"name"`
 }
 
-type Costume3DModel struct {
-	ID                   int    `json:"id"`
-	Costume3dID          int    `json:"costume3dId"`
-	Part                 string `json:"part,omitempty"`
-	AssetbundleName      string `json:"assetbundleName,omitempty"`
-	ColorAssetbundleName string `json:"colorAssetbundleName,omitempty"`
-}
-
 type Costume3DShopItemCost struct {
 	Costume3DShopItemID int    `json:"costume3dShopItemId"`
 	ResourceType        string `json:"resourceType,omitempty"`
@@ -100,7 +93,7 @@ type Costume3DShopItemCost struct {
 
 type MoeNormalizeStats struct {
 	AssetFromAlt          int
-	AssetFromModel        int
+	AssetFromGenerated    int
 	AssetFallback         int
 	NameFromGroup         int
 	CharacterFromGroup    int
@@ -142,17 +135,13 @@ func RunMoePreprocessor(repoDir string) error {
 	if err != nil {
 		return fmt.Errorf("costume3dColors.json: %w", err)
 	}
-	modelRows, err := loadOptionalJSON[[]Costume3DModel](filepath.Join(masterDir, "costume3dModels.json"))
-	if err != nil {
-		return fmt.Errorf("costume3dModels.json: %w", err)
-	}
 	shopCostRows, err := loadOptionalJSON[[]Costume3DShopItemCost](filepath.Join(masterDir, "costume3dShopItemCosts.json"))
 	if err != nil {
 		return fmt.Errorf("costume3dShopItemCosts.json: %w", err)
 	}
 
 	normalizeStats := &MoeNormalizeStats{}
-	normalizedCostumes := normalizeMoeCostume3Ds(*costume3ds, groupRows, colorRows, modelRows, normalizeStats)
+	normalizedCostumes := normalizeMoeCostume3Ds(*costume3ds, groupRows, colorRows, normalizeStats)
 	normalizedShopItems := normalizeMoeShopItems(*shopItems, shopCostRows, normalizeStats)
 
 	costumeByID := make(map[int]Costume3D)
@@ -261,8 +250,8 @@ func RunMoePreprocessor(repoDir string) error {
 		outPath, stats.Total, stats.TotalDefaults, float64(len(data))/1024)
 	log.Printf("[MoePreprocessor]    source=%v gender=%v rarity=%v",
 		stats.BySource, stats.ByGender, stats.ByRarity)
-	log.Printf("[MoePreprocessor]    normalize: asset(alt=%d model=%d fallback=%d) meta(name=%d char=%d rarity=%d designer=%d pub=%d arc=%d) color=%d type=%d shopCosts(items=%d rows=%d)",
-		normalizeStats.AssetFromAlt, normalizeStats.AssetFromModel, normalizeStats.AssetFallback,
+	log.Printf("[MoePreprocessor]    normalize: asset(alt=%d generated=%d fallback=%d) meta(name=%d char=%d rarity=%d designer=%d pub=%d arc=%d) color=%d type=%d shopCosts(items=%d rows=%d)",
+		normalizeStats.AssetFromAlt, normalizeStats.AssetFromGenerated, normalizeStats.AssetFallback,
 		normalizeStats.NameFromGroup, normalizeStats.CharacterFromGroup, normalizeStats.RarityFromGroup,
 		normalizeStats.DesignerFromGroup, normalizeStats.PublishedFromGroup, normalizeStats.ArchiveFromGroup,
 		normalizeStats.ColorNameFromColorMap, normalizeStats.TypeInferred,
@@ -284,7 +273,6 @@ func normalizeMoeCostume3Ds(
 	records []Costume3D,
 	groupRows *[]Costume3DGroup,
 	colorRows *[]Costume3DColor,
-	modelRows *[]Costume3DModel,
 	stats *MoeNormalizeStats,
 ) []Costume3D {
 	groupByID := make(map[int]Costume3DGroup)
@@ -303,16 +291,6 @@ func normalizeMoeCostume3Ds(
 		}
 	}
 
-	modelsByCostumeID := make(map[int][]Costume3DModel)
-	if modelRows != nil {
-		for _, m := range *modelRows {
-			if m.Costume3dID == 0 {
-				continue
-			}
-			modelsByCostumeID[m.Costume3dID] = append(modelsByCostumeID[m.Costume3dID], m)
-		}
-	}
-
 	normalized := make([]Costume3D, 0, len(records))
 	for _, c := range records {
 		n := c
@@ -321,15 +299,19 @@ func normalizeMoeCostume3Ds(
 			gid = *n.Costume3DGroupID
 		}
 
-		if n.AssetbundleName == "" && n.AssetbundleNameAlt != "" {
+		if n.AssetbundleName == "" && isJPStyleAssetbundleName(n.AssetbundleNameAlt) {
 			n.AssetbundleName = n.AssetbundleNameAlt
 			stats.AssetFromAlt++
 		}
 		if n.AssetbundleName == "" {
-			if asset := pickModelAssetbundle(modelsByCostumeID[n.ID], n.PartType); asset != "" {
-				n.AssetbundleName = asset
-				stats.AssetFromModel++
+			if generated := buildJPStyleAssetbundleName(gid, n.PartType, n.ColorID); generated != "" {
+				n.AssetbundleName = generated
+				stats.AssetFromGenerated++
 			}
+		}
+		if n.AssetbundleName == "" && n.AssetbundleNameAlt != "" {
+			n.AssetbundleName = n.AssetbundleNameAlt
+			stats.AssetFromAlt++
 		}
 		if n.AssetbundleName == "" {
 			n.AssetbundleName = fmt.Sprintf("costume3d_%d", n.ID)
@@ -384,26 +366,34 @@ func normalizeMoeCostume3Ds(
 	return normalized
 }
 
-func pickModelAssetbundle(models []Costume3DModel, partType string) string {
-	if len(models) == 0 {
+func isJPStyleAssetbundleName(name string) bool {
+	if name == "" {
+		return false
+	}
+	if strings.Contains(name, "/") {
+		return false
+	}
+
+	allDigit := true
+	for _, r := range name {
+		if r < '0' || r > '9' {
+			allDigit = false
+			break
+		}
+	}
+	return !allDigit
+}
+
+func buildJPStyleAssetbundleName(groupID int, partType string, colorID int) string {
+	if groupID < 1000 || partType == "" {
 		return ""
 	}
-	for _, m := range models {
-		if m.Part == partType && m.AssetbundleName != "" {
-			return m.AssetbundleName
-		}
+
+	base := fmt.Sprintf("cos%04d_%s", groupID/1000, partType)
+	if colorID <= 1 {
+		return base
 	}
-	for _, m := range models {
-		if m.AssetbundleName != "" {
-			return m.AssetbundleName
-		}
-	}
-	for _, m := range models {
-		if m.ColorAssetbundleName != "" {
-			return m.ColorAssetbundleName
-		}
-	}
-	return ""
+	return fmt.Sprintf("%s_%02d", base, colorID-1)
 }
 
 func normalizeMoeShopItems(

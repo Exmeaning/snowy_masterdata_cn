@@ -30,7 +30,8 @@ type Costume3D struct {
 	PartType           string `json:"partType"`
 	ColorID            int    `json:"colorId,omitempty"`
 	ColorName          string `json:"colorName,omitempty"`
-	AssetbundleName    string `json:"assetbundleName"`
+	AssetbundleName    string `json:"assetbundleName,omitempty"`
+	AssetbundleNameAlt string `json:"_assetbundleName,omitempty"`
 	CharacterID        int    `json:"characterId"`
 	Costume3DRarity    string `json:"costume3dRarity,omitempty"`
 	Designer           string `json:"designer,omitempty"`
@@ -47,6 +48,29 @@ type ShopCost struct {
 	ResourceType string `json:"resourceType,omitempty"`
 	ResourceID   int    `json:"resourceId,omitempty"`
 	Quantity     int    `json:"quantity,omitempty"`
+}
+
+func (c *ShopCost) UnmarshalJSON(data []byte) error {
+	type rawShopCost struct {
+		ResourceType     string `json:"resourceType"`
+		ResourceID       int    `json:"resourceId"`
+		Quantity         int    `json:"quantity"`
+		ResourceQuantity int    `json:"resourceQuantity"`
+	}
+
+	var raw rawShopCost
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	c.ResourceType = raw.ResourceType
+	c.ResourceID = raw.ResourceID
+	if raw.Quantity != 0 {
+		c.Quantity = raw.Quantity
+	} else {
+		c.Quantity = raw.ResourceQuantity
+	}
+	return nil
 }
 
 type Costume3DShopItem struct {

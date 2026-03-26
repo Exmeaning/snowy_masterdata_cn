@@ -13,9 +13,9 @@ import (
 
 // MoeExtraPart 个别角色拥有的特殊部位（如 unique_head）
 type MoeExtraPart struct {
-	CharacterID int            `json:"characterId"`
-	PartType    string         `json:"partType"`
-	Variants    []PartVariant  `json:"variants"`
+	CharacterID int           `json:"characterId"`
+	PartType    string        `json:"partType"`
+	Variants    []PartVariant `json:"variants"`
 }
 
 // MoeCostumeEntry 以 costumeNumber（groupId / 1000）为主键
@@ -65,6 +65,55 @@ type MoePreprocessorOutput struct {
 	Defaults []MoeDefaultEntry `json:"defaults"`
 }
 
+// ── 国服补充数据结构（可选文件）─────────────────────────────────
+
+type Costume3DGroup struct {
+	GroupID            int    `json:"groupId"`
+	Name               string `json:"name"`
+	CharacterID        int    `json:"characterId"`
+	Rarity             string `json:"rarity"`
+	Designer           string `json:"designer,omitempty"`
+	PublishedAt        *int64 `json:"publishedAt,omitempty"`
+	ArchivePublishedAt *int64 `json:"archivePublishedAt,omitempty"`
+}
+
+type Costume3DColor struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+type Costume3DModel struct {
+	ID                   int    `json:"id"`
+	Costume3dID          int    `json:"costume3dId"`
+	Part                 string `json:"part,omitempty"`
+	AssetbundleName      string `json:"assetbundleName,omitempty"`
+	ColorAssetbundleName string `json:"colorAssetbundleName,omitempty"`
+}
+
+type Costume3DShopItemCost struct {
+	Costume3DShopItemID int    `json:"costume3dShopItemId"`
+	ResourceType        string `json:"resourceType,omitempty"`
+	ResourceID          int    `json:"resourceId,omitempty"`
+	Quantity            int    `json:"quantity,omitempty"`
+	ResourceQuantity    int    `json:"resourceQuantity,omitempty"`
+}
+
+type MoeNormalizeStats struct {
+	AssetFromAlt          int
+	AssetFromModel        int
+	AssetFallback         int
+	NameFromGroup         int
+	CharacterFromGroup    int
+	RarityFromGroup       int
+	DesignerFromGroup     int
+	PublishedFromGroup    int
+	ArchiveFromGroup      int
+	ColorNameFromColorMap int
+	TypeInferred          int
+	ShopCostsFromTable    int
+	ShopCostRowsFromTable int
+}
+
 // ── 核心逻辑 ─────────────────────────────────────────────────
 
 func RunMoePreprocessor(repoDir string) error {
@@ -84,15 +133,37 @@ func RunMoePreprocessor(repoDir string) error {
 		return fmt.Errorf("costume3dShopItems.json: %w", err)
 	}
 
+	// 国服补充表：不存在则跳过（保持日服兼容）
+	groupRows, err := loadOptionalJSON[[]Costume3DGroup](filepath.Join(masterDir, "costume3dGroups.json"))
+	if err != nil {
+		return fmt.Errorf("costume3dGroups.json: %w", err)
+	}
+	colorRows, err := loadOptionalJSON[[]Costume3DColor](filepath.Join(masterDir, "costume3dColors.json"))
+	if err != nil {
+		return fmt.Errorf("costume3dColors.json: %w", err)
+	}
+	modelRows, err := loadOptionalJSON[[]Costume3DModel](filepath.Join(masterDir, "costume3dModels.json"))
+	if err != nil {
+		return fmt.Errorf("costume3dModels.json: %w", err)
+	}
+	shopCostRows, err := loadOptionalJSON[[]Costume3DShopItemCost](filepath.Join(masterDir, "costume3dShopItemCosts.json"))
+	if err != nil {
+		return fmt.Errorf("costume3dShopItemCosts.json: %w", err)
+	}
+
+	normalizeStats := &MoeNormalizeStats{}
+	normalizedCostumes := normalizeMoeCostume3Ds(*costume3ds, groupRows, colorRows, modelRows, normalizeStats)
+	normalizedShopItems := normalizeMoeShopItems(*shopItems, shopCostRows, normalizeStats)
+
 	costumeByID := make(map[int]Costume3D)
-	for _, c := range *costume3ds {
+	for _, c := range normalizedCostumes {
 		costumeByID[c.ID] = c
 	}
 
 	// 分离默认 / 非默认，按 costumeNumber 分组
 	numberGroup := make(map[int][]Costume3D)
 	var defaultRecords []Costume3D
-	for _, c := range *costume3ds {
+	for _, c := range normalizedCostumes {
 		if c.Costume3DGroupID == nil {
 			continue
 		}
@@ -120,7 +191,7 @@ func RunMoePreprocessor(repoDir string) error {
 
 	// shop 关联
 	shopByNumber := make(map[int]Costume3DShopItem)
-	for _, item := range *shopItems {
+	for _, item := range normalizedShopItems {
 		for _, ptr := range []*int{item.HeadCostume3dID, item.BodyCostume3dID} {
 			if ptr == nil {
 				continue
@@ -190,7 +261,195 @@ func RunMoePreprocessor(repoDir string) error {
 		outPath, stats.Total, stats.TotalDefaults, float64(len(data))/1024)
 	log.Printf("[MoePreprocessor]    source=%v gender=%v rarity=%v",
 		stats.BySource, stats.ByGender, stats.ByRarity)
+	log.Printf("[MoePreprocessor]    normalize: asset(alt=%d model=%d fallback=%d) meta(name=%d char=%d rarity=%d designer=%d pub=%d arc=%d) color=%d type=%d shopCosts(items=%d rows=%d)",
+		normalizeStats.AssetFromAlt, normalizeStats.AssetFromModel, normalizeStats.AssetFallback,
+		normalizeStats.NameFromGroup, normalizeStats.CharacterFromGroup, normalizeStats.RarityFromGroup,
+		normalizeStats.DesignerFromGroup, normalizeStats.PublishedFromGroup, normalizeStats.ArchiveFromGroup,
+		normalizeStats.ColorNameFromColorMap, normalizeStats.TypeInferred,
+		normalizeStats.ShopCostsFromTable, normalizeStats.ShopCostRowsFromTable)
 	return nil
+}
+
+func loadOptionalJSON[T any](path string) (*T, error) {
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return loadJSON[T](path)
+}
+
+func normalizeMoeCostume3Ds(
+	records []Costume3D,
+	groupRows *[]Costume3DGroup,
+	colorRows *[]Costume3DColor,
+	modelRows *[]Costume3DModel,
+	stats *MoeNormalizeStats,
+) []Costume3D {
+	groupByID := make(map[int]Costume3DGroup)
+	if groupRows != nil {
+		for _, g := range *groupRows {
+			groupByID[g.GroupID] = g
+		}
+	}
+
+	colorByID := make(map[int]string)
+	if colorRows != nil {
+		for _, c := range *colorRows {
+			if c.Name != "" {
+				colorByID[c.ID] = c.Name
+			}
+		}
+	}
+
+	modelsByCostumeID := make(map[int][]Costume3DModel)
+	if modelRows != nil {
+		for _, m := range *modelRows {
+			if m.Costume3dID == 0 {
+				continue
+			}
+			modelsByCostumeID[m.Costume3dID] = append(modelsByCostumeID[m.Costume3dID], m)
+		}
+	}
+
+	normalized := make([]Costume3D, 0, len(records))
+	for _, c := range records {
+		n := c
+		gid := 0
+		if n.Costume3DGroupID != nil {
+			gid = *n.Costume3DGroupID
+		}
+
+		if n.AssetbundleName == "" && n.AssetbundleNameAlt != "" {
+			n.AssetbundleName = n.AssetbundleNameAlt
+			stats.AssetFromAlt++
+		}
+		if n.AssetbundleName == "" {
+			if asset := pickModelAssetbundle(modelsByCostumeID[n.ID], n.PartType); asset != "" {
+				n.AssetbundleName = asset
+				stats.AssetFromModel++
+			}
+		}
+		if n.AssetbundleName == "" {
+			n.AssetbundleName = fmt.Sprintf("costume3d_%d", n.ID)
+			stats.AssetFallback++
+		}
+
+		if g, ok := groupByID[gid]; ok {
+			if (n.Name == "" || n.Name == "未設定") && g.Name != "" {
+				n.Name = g.Name
+				stats.NameFromGroup++
+			}
+			if n.CharacterID == 0 && g.CharacterID != 0 {
+				n.CharacterID = g.CharacterID
+				stats.CharacterFromGroup++
+			}
+			if n.Costume3DRarity == "" && g.Rarity != "" {
+				n.Costume3DRarity = g.Rarity
+				stats.RarityFromGroup++
+			}
+			if n.Designer == "" && g.Designer != "" {
+				n.Designer = g.Designer
+				stats.DesignerFromGroup++
+			}
+			if n.PublishedAt == nil && g.PublishedAt != nil {
+				n.PublishedAt = g.PublishedAt
+				stats.PublishedFromGroup++
+			}
+			if n.ArchivePublishedAt == nil && g.ArchivePublishedAt != nil {
+				n.ArchivePublishedAt = g.ArchivePublishedAt
+				stats.ArchiveFromGroup++
+			}
+		}
+
+		if n.ColorName == "" {
+			if colorName := colorByID[n.ColorID]; colorName != "" {
+				n.ColorName = colorName
+				stats.ColorNameFromColorMap++
+			}
+		}
+
+		if n.Costume3DType == "" {
+			if gid > 0 && gid < 1000 {
+				n.Costume3DType = "default"
+			} else {
+				n.Costume3DType = "normal"
+			}
+			stats.TypeInferred++
+		}
+
+		normalized = append(normalized, n)
+	}
+	return normalized
+}
+
+func pickModelAssetbundle(models []Costume3DModel, partType string) string {
+	if len(models) == 0 {
+		return ""
+	}
+	for _, m := range models {
+		if m.Part == partType && m.AssetbundleName != "" {
+			return m.AssetbundleName
+		}
+	}
+	for _, m := range models {
+		if m.AssetbundleName != "" {
+			return m.AssetbundleName
+		}
+	}
+	for _, m := range models {
+		if m.ColorAssetbundleName != "" {
+			return m.ColorAssetbundleName
+		}
+	}
+	return ""
+}
+
+func normalizeMoeShopItems(
+	shopItems []Costume3DShopItem,
+	shopCostRows *[]Costume3DShopItemCost,
+	stats *MoeNormalizeStats,
+) []Costume3DShopItem {
+	costByItemID := make(map[int][]ShopCost)
+	if shopCostRows != nil {
+		for _, row := range *shopCostRows {
+			qty := row.Quantity
+			if qty == 0 {
+				qty = row.ResourceQuantity
+			}
+			costByItemID[row.Costume3DShopItemID] = append(costByItemID[row.Costume3DShopItemID], ShopCost{
+				ResourceType: row.ResourceType,
+				ResourceID:   row.ResourceID,
+				Quantity:     qty,
+			})
+		}
+
+		for itemID := range costByItemID {
+			sort.Slice(costByItemID[itemID], func(i, j int) bool {
+				if costByItemID[itemID][i].ResourceType != costByItemID[itemID][j].ResourceType {
+					return costByItemID[itemID][i].ResourceType < costByItemID[itemID][j].ResourceType
+				}
+				return costByItemID[itemID][i].ResourceID < costByItemID[itemID][j].ResourceID
+			})
+		}
+	}
+
+	normalized := make([]Costume3DShopItem, 0, len(shopItems))
+	for _, item := range shopItems {
+		n := item
+		n.Costs = append([]ShopCost(nil), item.Costs...)
+		if len(n.Costs) == 0 {
+			if costs := costByItemID[item.ID]; len(costs) > 0 {
+				n.Costs = append([]ShopCost(nil), costs...)
+				stats.ShopCostsFromTable++
+				stats.ShopCostRowsFromTable += len(costs)
+			}
+		}
+		normalized = append(normalized, n)
+	}
+
+	return normalized
 }
 
 // buildMoeCostumeEntry 聚合同一 costumeNumber 的所有记录
@@ -332,9 +591,15 @@ func buildMoeCostumeEntry(costumeNumber int, group []Costume3D) MoeCostumeEntry 
 func buildPartsMap(records []Costume3D) map[string][]PartVariant {
 	sort.Slice(records, func(i, j int) bool {
 		ci, cj := records[i].ColorID, records[j].ColorID
-		if ci == 0 { ci = 1 }
-		if cj == 0 { cj = 1 }
-		if ci != cj { return ci < cj }
+		if ci == 0 {
+			ci = 1
+		}
+		if cj == 0 {
+			cj = 1
+		}
+		if ci != cj {
+			return ci < cj
+		}
 		return records[i].ID < records[j].ID
 	})
 
@@ -347,7 +612,9 @@ func buildPartsMap(records []Costume3D) map[string][]PartVariant {
 		if !seen[c.PartType][c.AssetbundleName] {
 			seen[c.PartType][c.AssetbundleName] = true
 			cid := c.ColorID
-			if cid == 0 { cid = 1 }
+			if cid == 0 {
+				cid = 1
+			}
 			parts[c.PartType] = append(parts[c.PartType], PartVariant{
 				ColorID: cid, ColorName: c.ColorName,
 				AssetbundleName: c.AssetbundleName,
@@ -381,11 +648,17 @@ func buildDefaults(records []Costume3D) []MoeDefaultEntry {
 	defaults := make([]MoeDefaultEntry, 0, len(records))
 	for _, c := range records {
 		rarity := c.Costume3DRarity
-		if rarity == "" { rarity = "normal" }
+		if rarity == "" {
+			rarity = "normal"
+		}
 		ctype := c.Costume3DType
-		if ctype == "" { ctype = "normal" }
+		if ctype == "" {
+			ctype = "normal"
+		}
 		cid := c.ColorID
-		if cid == 0 { cid = 1 }
+		if cid == 0 {
+			cid = 1
+		}
 		defaults = append(defaults, MoeDefaultEntry{
 			GroupID: *c.Costume3DGroupID, Name: c.Name,
 			CharacterID: c.CharacterID, PartType: c.PartType,

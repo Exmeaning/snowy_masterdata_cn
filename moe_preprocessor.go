@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 )
 
 // ── 输出数据结构 ─────────────────────────────────────────────
@@ -299,19 +298,23 @@ func normalizeMoeCostume3Ds(
 			gid = *n.Costume3DGroupID
 		}
 
-		if n.AssetbundleName == "" && isJPStyleAssetbundleName(n.AssetbundleNameAlt) {
-			n.AssetbundleName = n.AssetbundleNameAlt
-			stats.AssetFromAlt++
+		if n.AssetbundleName == "" && n.AssetbundleNameAlt != "" {
+			// 国服 _assetbundleName 处理：
+			// - 纯数字（如 "01012"）→ 拼接为 cos01012_head_01
+			// - 非纯数字（如 "cos0029_unique_head"、"head_default_01"）→ 直接使用
+			if isAllDigit(n.AssetbundleNameAlt) {
+				n.AssetbundleName = buildSCStyleAssetbundleName(n.AssetbundleNameAlt, n.PartType, n.ColorID)
+				stats.AssetFromGenerated++
+			} else {
+				n.AssetbundleName = n.AssetbundleNameAlt
+				stats.AssetFromAlt++
+			}
 		}
 		if n.AssetbundleName == "" {
 			if generated := buildJPStyleAssetbundleName(gid, n.PartType, n.ColorID); generated != "" {
 				n.AssetbundleName = generated
 				stats.AssetFromGenerated++
 			}
-		}
-		if n.AssetbundleName == "" && n.AssetbundleNameAlt != "" {
-			n.AssetbundleName = n.AssetbundleNameAlt
-			stats.AssetFromAlt++
 		}
 		if n.AssetbundleName == "" {
 			n.AssetbundleName = fmt.Sprintf("costume3d_%d", n.ID)
@@ -366,22 +369,27 @@ func normalizeMoeCostume3Ds(
 	return normalized
 }
 
-func isJPStyleAssetbundleName(name string) bool {
-	if name == "" {
+// isAllDigit 判断字符串是否全部为数字字符
+func isAllDigit(s string) bool {
+	if s == "" {
 		return false
 	}
-	if strings.Contains(name, "/") {
-		return false
-	}
-
-	allDigit := true
-	for _, r := range name {
+	for _, r := range s {
 		if r < '0' || r > '9' {
-			allDigit = false
-			break
+			return false
 		}
 	}
-	return !allDigit
+	return true
+}
+
+// buildSCStyleAssetbundleName 国服纯数字 _assetbundleName 拼接规则
+// 纯数字（如 "01012"）→ cos01012_{partType}_{colorId:02d}
+func buildSCStyleAssetbundleName(abnAlt, partType string, colorID int) string {
+	cid := colorID
+	if cid <= 0 {
+		cid = 1
+	}
+	return fmt.Sprintf("cos%s_%s_%02d", abnAlt, partType, cid)
 }
 
 func buildJPStyleAssetbundleName(groupID int, partType string, colorID int) string {

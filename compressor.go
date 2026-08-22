@@ -191,7 +191,7 @@ func writeGzip(out string, data []byte) error {
 
 func writeBrotli(out string, data []byte) error {
 	var buf bytes.Buffer
-	w := brotli.NewWriterLevel(&buf, brotli.BestCompression)
+	w := brotli.NewWriterLevel(&buf, 9)
 	if _, err := io.Copy(w, bytes.NewReader(data)); err != nil {
 		w.Close()
 		return err
